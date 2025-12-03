@@ -968,9 +968,17 @@ def prompt_alt_replacement(
     print(f"          Stats: queue={alt['queueLength']}, free_slot={alt['hasFreeUploadSlot']}, upload_speed={alt['uploadSpeed']}")
     print()
     
-    # Auto-replace if within threshold
-    if auto_replace and abs_rel_pct <= auto_replace_threshold:
-        print(f"[ALT] Auto-replacing (size diff {abs_rel_pct:.1f}% <= {auto_replace_threshold}% threshold)...")
+    # Auto-replace logic:
+    # - Bigger files (positive diff): always allowed (likely better quality)
+    # - Smaller files (negative diff): only if within threshold (might be lower quality)
+    is_bigger = rel_pct >= 0
+    within_shrink_threshold = rel_pct < 0 and abs_rel_pct <= auto_replace_threshold
+    
+    if auto_replace and (is_bigger or within_shrink_threshold):
+        if is_bigger:
+            print(f"[ALT] Auto-replacing (new file is {abs_rel_pct:.1f}% larger - OK)...")
+        else:
+            print(f"[ALT] Auto-replacing (shrinkage {abs_rel_pct:.1f}% <= {auto_replace_threshold}% threshold)...")
         
         # Cancel the old download
         ok_cancel, reason_cancel = cancel_download(slskd, item, remove=True)
@@ -987,8 +995,8 @@ def prompt_alt_replacement(
             print(f"[ALT] Failed to enqueue new download: {reason_enqueue}")
             return False
     
-    # Near-miss: outside auto-replace threshold
-    is_near_miss = auto_replace and abs_rel_pct > auto_replace_threshold
+    # Near-miss: shrinkage that exceeds threshold (bigger files are always OK)
+    is_near_miss = auto_replace and rel_pct < 0 and abs_rel_pct > auto_replace_threshold
     
     if auto_mode:
         if is_near_miss:
@@ -1102,7 +1110,8 @@ def process_queue(
     now = time.monotonic()
     sort_queue_by_priority()
     idx = 0
-    while idx < len(queue):
+    # Main loop - runs indefinitely, polling for new items when queue empties
+    while True:
         now = time.monotonic()
 
         # Periodically refresh snapshot and drop items that no longer need retry
@@ -1124,14 +1133,24 @@ def process_queue(
                 sort_queue_by_priority()  # Re-sort so fresh items come first
                 idx = 0  # start from front again
                 print(f"[INFO] Snapshot refreshed. Queue now has {len(queue)} items (sorted by priority). Alt-search cache cleared.")
-                if not queue:
-                    print("[INFO] No remaining problem downloads after refresh.")
-                    return
             except Exception as exc:
                 print(f"[WARN] Failed to refresh snapshot: {exc}")
 
         if not queue:
-            break
+            # No items to process - wait and poll for new problem downloads
+            print(f"[INFO] Queue empty. Waiting {snapshot_refresh_interval:.0f}s for new problem downloads...")
+            time.sleep(snapshot_refresh_interval)
+            try:
+                raw = fetch_all_downloads(slskd)
+                queue = build_problem_queue(raw)
+                if queue:
+                    sort_queue_by_priority()
+                    print(f"[INFO] Found {len(queue)} new problem download(s)")
+                last_snapshot_ts = time.monotonic()
+            except Exception as exc:
+                print(f"[WARN] Failed to check for new downloads: {exc}")
+            idx = 0
+            continue
 
         if idx >= len(queue):
             idx = 0
@@ -1326,10 +1345,9 @@ def process_queue(
                 
                 pending_alt_searches.clear()
 
-        # Move this item to the back of the queue
-        queue.append(queue.pop(idx))
-
-    print("Done for this run.")
+        # Move this item to the back of the queue (if queue still has items)
+        if queue and idx < len(queue):
+            queue.append(queue.pop(idx))
 
 
 # ---------------------- CLI ---------------------- #
