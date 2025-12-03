@@ -859,9 +859,15 @@ def process_queue(
             continue
 
         # When retry_before_replace=0, skip re-enqueue and go straight to alt search
+        # Also skip if we already searched and found no suitable alt
         if retry_before_replace == 0 and track_key not in alt_offered_for:
             print(f"[INFO] Skipping re-enqueue for {item.display_name()} (retry_before_replace=0)")
             ok, reason = False, "skipped"
+        elif track_key in alt_offered_for:
+            # Already searched, no suitable alt - skip this item entirely
+            print(f"[INFO] Skipping {item.display_name()} - already searched, no suitable alt found")
+            queue.pop(idx)
+            continue
         else:
             ok, reason = reenqueue_download(slskd, item)
         
