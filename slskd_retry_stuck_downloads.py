@@ -524,12 +524,19 @@ def perform_search(slskd: SlskdSession, search_text: str, max_wait: float = 30.0
     return result
 
 
-def find_best_alt_candidate(responses_state: object, target_size: int, target_ext: str) -> Tuple[Optional[dict], Optional[dict]]:
+def find_best_alt_candidate(
+    responses_state: object,
+    target_size: int,
+    target_ext: str,
+    exclude_username: str = None,
+) -> Tuple[Optional[dict], Optional[dict]]:
     """
     Given the SearchState JSON (with 'responses' list) OR a bare list of responses,
     find the best alt candidate:
+      - NOT from exclude_username (the original failing source)
       - same extension where possible
       - size within DEFAULT_MAX_SIZE_DIFF
+      - closest size match preferred
       - free upload slot preferred
       - shorter queue length better
       - higher upload speed better
@@ -564,6 +571,11 @@ def find_best_alt_candidate(responses_state: object, target_size: int, target_ex
             print(f"[ALT-DEBUG] First response keys: {list(resp.keys()) if isinstance(resp, dict) else type(resp)}")
         
         username = resp.get("username") or ""
+        
+        # Skip the original failing source - no point replacing with same user!
+        if exclude_username and username.lower() == exclude_username.lower():
+            continue
+        
         queue_len = int(resp.get("queueLength") or 0)
         free_slot = bool(resp.get("hasFreeUploadSlot", False))
         upload_speed = int(resp.get("uploadSpeed") or 0)
@@ -884,7 +896,11 @@ def process_queue(
                     elif len(responses) == 0:
                         print(f"[ALT] Zero results on network for '{track_name}' (search: '{batch_search_text}')")
                     else:
-                        best, closest = find_best_alt_candidate(responses, batch_item.size, batch_item.ext)
+                        # Exclude the original failing source from candidates
+                        best, closest = find_best_alt_candidate(
+                            responses, batch_item.size, batch_item.ext,
+                            exclude_username=batch_item.key.username
+                        )
                         if not best:
                             if closest:
                                 print(f"[ALT] No auto-replace candidate for '{track_name}'")
