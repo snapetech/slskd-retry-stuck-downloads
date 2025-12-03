@@ -864,28 +864,77 @@ def format_size(mi_bytes: float) -> str:
 DEFAULT_AUTO_REPLACE_THRESHOLD = 5.0  # percent
 
 
-def enqueue_download(slskd: SlskdSession, username: str, filename: str, size: int) -> Tuple[bool, str]:
-    """Enqueue a download from a specific user."""
-    try:
-        files = [{"filename": filename, "size": size}]
-        resp = slskd.post(f"/transfers/downloads/{quote(username)}", json=files)
-        if resp.status_code < 400:
-            return True, "ok"
-        return False, f"HTTP {resp.status_code}"
-    except requests.RequestException as exc:
-        return False, str(exc)
+def enqueue_download(slskd: SlskdSession, username: str, filename: str, size: int, max_retries: int = 3) -> Tuple[bool, str]:
+    """Enqueue a download from a specific user. Retries on transient errors."""
+    files = [{"filename": filename, "size": size}]
+    last_error = ""
+    
+    for attempt in range(max_retries):
+        try:
+            # Use longer timeout for enqueue (can be slow if user is offline)
+            resp = slskd.session.post(
+                slskd._url(f"/transfers/downloads/{quote(username)}"),
+                json=files,
+                timeout=30.0  # 30 second timeout for enqueue
+            )
+            if resp.status_code < 400:
+                return True, "ok"
+            elif resp.status_code >= 500:
+                # Server error - retry
+                last_error = f"HTTP {resp.status_code}"
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s, 4s
+                    continue
+            else:
+                # Client error (4xx) - don't retry
+                return False, f"HTTP {resp.status_code}"
+        except requests.exceptions.Timeout:
+            last_error = "timeout"
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+        except requests.RequestException as exc:
+            last_error = str(exc)
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+    
+    return False, last_error
 
 
-def cancel_download(slskd: SlskdSession, item: DownloadItem, remove: bool = True) -> Tuple[bool, str]:
-    """Cancel (and optionally remove) a stuck download."""
-    try:
-        params = {"remove": "true"} if remove else {}
-        resp = slskd.delete(f"/transfers/downloads/{quote(item.key.username)}/{quote(item.id)}", params=params)
-        if resp.status_code < 400:
-            return True, "ok"
-        return False, f"HTTP {resp.status_code}"
-    except requests.RequestException as exc:
-        return False, str(exc)
+def cancel_download(slskd: SlskdSession, item: DownloadItem, remove: bool = True, max_retries: int = 3) -> Tuple[bool, str]:
+    """Cancel (and optionally remove) a stuck download. Retries on transient errors."""
+    params = {"remove": "true"} if remove else {}
+    last_error = ""
+    
+    for attempt in range(max_retries):
+        try:
+            resp = slskd.session.delete(
+                slskd._url(f"/transfers/downloads/{quote(item.key.username)}/{quote(item.id)}"),
+                params=params,
+                timeout=30.0
+            )
+            if resp.status_code < 400:
+                return True, "ok"
+            elif resp.status_code >= 500:
+                last_error = f"HTTP {resp.status_code}"
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+                    continue
+            else:
+                return False, f"HTTP {resp.status_code}"
+        except requests.exceptions.Timeout:
+            last_error = "timeout"
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+        except requests.RequestException as exc:
+            last_error = str(exc)
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+    
+    return False, last_error
 
 
 def prompt_alt_replacement(
