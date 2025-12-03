@@ -320,9 +320,9 @@ def start_search(slskd: SlskdSession, search_text: str, search_timeout_ms: int =
 
 def poll_search(slskd: SlskdSession, search_id: str, force_responses: bool = False, debug: bool = False) -> Tuple[bool, Optional[List]]:
     """Poll a search. Returns (is_complete, responses_or_None).
-    If force_responses=True, return whatever responses exist even if not complete."""
+    If force_responses=True, wait up to 10s extra for completion if we have responseCount."""
     try:
-        # Fetch with includeResponses=true to get responses inline (doesn't require completed search)
+        # Fetch with includeResponses=true to get responses inline
         resp = slskd.get(f"/searches/{search_id}", params={"includeResponses": "true"})
         if resp.status_code >= 400:
             return False, None
@@ -344,15 +344,24 @@ def poll_search(slskd: SlskdSession, search_id: str, force_responses: bool = Fal
             return True, responses
         
         # If force_responses and we have responseCount but no inline responses,
-        # try the /responses endpoint as a fallback (works for some completed states)
+        # wait a bit longer for the search to complete (inline responses only work for complete searches)
         if force_responses and response_count > 0 and not responses:
-            resp2 = slskd.get(f"/searches/{search_id}/responses")
-            if resp2.status_code < 400:
-                fallback_responses = resp2.json()
-                if fallback_responses:
+            if debug:
+                print(f"[DEBUG] Search {search_id}: has {response_count} responses but not complete, waiting...")
+            # Wait up to 10 more seconds for completion
+            for _ in range(10):
+                time.sleep(1)
+                resp2 = slskd.get(f"/searches/{search_id}", params={"includeResponses": "true"})
+                if resp2.status_code >= 400:
+                    continue
+                data2 = resp2.json()
+                state2 = data2.get("state", "")
+                is_complete2 = data2.get("isComplete", False) or "Completed" in state2
+                responses2 = data2.get("responses", [])
+                if is_complete2 and responses2:
                     if debug:
-                        print(f"[DEBUG] Search {search_id}: got {len(fallback_responses)} from /responses fallback")
-                    return True, fallback_responses
+                        print(f"[DEBUG] Search {search_id}: completed after extra wait, {len(responses2)} responses")
+                    return True, responses2
         
         return False, None
     except requests.RequestException as e:
@@ -590,19 +599,24 @@ def find_best_alt_candidate(
 
         for f in files:
             total_files += 1
-            ext = (f.get("extension") or "").lower()
-            if target_ext and ext and ext != target_ext:
-                filtered_ext += 1
-                continue
+            ext = (f.get("extension") or "").lower().lstrip(".")
+            # Must match target extension (filter if no ext or different ext)
+            if target_ext:
+                if not ext or ext != target_ext:
+                    filtered_ext += 1
+                    continue
 
             size = int(f.get("size") or 0)
             path = f.get("filename") or f.get("fullname") or ""
             
-            # Calculate size diff
-            if target_size > 0 and size > 0:
+            # Calculate size diff - reject files with 0 size
+            if size <= 0:
+                filtered_size += 1
+                continue  # Skip 0-byte files entirely
+            if target_size > 0:
                 rel_diff = abs(size - target_size) / float(target_size)
             else:
-                rel_diff = 0.0
+                rel_diff = 1.0  # If target is 0, any size is a mismatch
             
             # Track closest match by size (for reporting)
             if closest_diff is None or rel_diff < closest_diff:
