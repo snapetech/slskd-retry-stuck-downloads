@@ -293,12 +293,20 @@ def clean_track_title(filename: str, strip_artist: str = None) -> str:
         # Also strip if artist appears after album: "Album - Artist - Song" (less common)
         name = re.sub(rf"\s*-\s*{re.escape(strip_artist)}\s*-\s*", " - ", name, flags=re.IGNORECASE)
 
-    # Strip common junk suffixes
+    # Strip parenthetical content that's just noise (remix, edit, etc.)
+    # Must do this BEFORE stripping suffixes to keep parens balanced
+    name = re.sub(r"\s*\([^)]*(?:remix|edit|mix|version|ver\.?|remaster|remastered|instrumental|acoustic|live|demo)[^)]*\)", "", name, flags=re.IGNORECASE)
+    
+    # Strip common junk suffixes (after paren cleanup to avoid unbalanced parens)
     name = re.sub(r"\s*[\(\[]?(?:official|music|video|audio|lyric|lyrics|explicit|clean|remaster|remastered|remix|edit|version|ver\.?)[\)\]]?\s*$", "", name, flags=re.IGNORECASE)
     
-    # Strip parenthetical content that's just noise (but keep meaningful stuff like "(feat. X)")
-    # Only strip if it's not "feat" related
-    name = re.sub(r"\s*\([^)]*(?:remix|edit|mix|version|ver\.?|remaster|instrumental|acoustic|live|demo)\)", "", name, flags=re.IGNORECASE)
+    # Strip periods after single letters (abbreviations like "A." -> "A")
+    name = re.sub(r"\b([A-Z])\.(?=\s|$)", r"\1", name)
+    
+    # Strip unmatched opening parentheses/brackets at end (from partial removals)
+    name = re.sub(r"\s*[\(\[]\s*$", "", name)
+    # Strip unmatched closing parens/brackets at start
+    name = re.sub(r"^\s*[\)\]]\s*", "", name)
 
     # Collapse whitespace and extra dashes
     name = re.sub(r"\s+", " ", name)
