@@ -322,30 +322,37 @@ def poll_search(slskd: SlskdSession, search_id: str, force_responses: bool = Fal
     """Poll a search. Returns (is_complete, responses_or_None).
     If force_responses=True, return whatever responses exist even if not complete."""
     try:
-        # First get search state
-        resp = slskd.get(f"/searches/{search_id}")
+        # Fetch with includeResponses=true to get responses inline (doesn't require completed search)
+        resp = slskd.get(f"/searches/{search_id}", params={"includeResponses": "true"})
         if resp.status_code >= 400:
             return False, None
         data = resp.json()
         state = data.get("state", "")
         is_complete = data.get("isComplete", False) or "Completed" in state
         response_count = data.get("responseCount", 0)
+        responses = data.get("responses", [])
         
         if debug:
-            print(f"[DEBUG] Search {search_id}: state={state}, isComplete={data.get('isComplete')}, responseCount={response_count}")
+            print(f"[DEBUG] Search {search_id}: state={state}, isComplete={data.get('isComplete')}, responseCount={response_count}, inline_responses={len(responses)}")
         
-        # If complete OR we have responses and want them, fetch from /responses endpoint
-        if is_complete or (force_responses and response_count > 0):
+        # If complete, we're done
+        if is_complete:
+            return True, responses
+        
+        # If force_responses requested (timeout case) and we have responses inline, return them
+        if force_responses and responses:
+            return True, responses
+        
+        # If force_responses and we have responseCount but no inline responses,
+        # try the /responses endpoint as a fallback (works for some completed states)
+        if force_responses and response_count > 0 and not responses:
             resp2 = slskd.get(f"/searches/{search_id}/responses")
             if resp2.status_code < 400:
-                responses = resp2.json()
-                if debug:
-                    print(f"[DEBUG] Search {search_id}: fetched {len(responses)} responses from /responses endpoint")
-                return True, responses
-            else:
-                # Fall back to inline responses
-                responses = data.get("responses", [])
-                return is_complete, responses if responses else []
+                fallback_responses = resp2.json()
+                if fallback_responses:
+                    if debug:
+                        print(f"[DEBUG] Search {search_id}: got {len(fallback_responses)} from /responses fallback")
+                    return True, fallback_responses
         
         return False, None
     except requests.RequestException as e:
@@ -401,8 +408,8 @@ def sliding_window_search(
             elapsed = now - start_time
             timed_out = elapsed >= per_search_timeout
             
-            # Try to get responses (force if timed out)
-            is_complete, responses = poll_search(slskd, search_id, force_responses=timed_out)
+            # Try to get responses (force if timed out, debug on timeout to see what's happening)
+            is_complete, responses = poll_search(slskd, search_id, force_responses=timed_out, debug=timed_out)
             
             if is_complete or timed_out:
                 results[item] = responses if responses else []
