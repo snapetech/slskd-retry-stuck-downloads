@@ -161,20 +161,35 @@ def collect_states(slskd: SlskdSession) -> List[str]:
     return states
 
 
-def build_problem_queue(raw_downloads: List[dict]) -> List[DownloadItem]:
+def build_problem_queue(raw_downloads: List[dict], debug: bool = False) -> List[DownloadItem]:
     """
     From all downloads, build an ordered list of "problem" items to process.
     Deduplicates by DownloadKey.
     """
     seen: set[DownloadKey] = set()
     queue: List[DownloadItem] = []
+    state_counts: dict[str, int] = {}
+    skipped_examples: dict[str, str] = {}  # state -> example filename
+    
     for item in iter_download_items(raw_downloads):
+        state_counts[item.state] = state_counts.get(item.state, 0) + 1
+        
         if item.state not in PROBLEM_STATES:
+            if item.state not in skipped_examples:
+                skipped_examples[item.state] = item.key.filename
             continue
         if item.key in seen:
             continue
         seen.add(item.key)
         queue.append(item)
+    
+    if debug:
+        print(f"[DEBUG] Download states breakdown:")
+        for state, count in sorted(state_counts.items()):
+            in_problem = "✓" if state in PROBLEM_STATES else "✗"
+            example = f" (e.g. {os.path.basename(skipped_examples.get(state, ''))})" if state not in PROBLEM_STATES else ""
+            print(f"[DEBUG]   {in_problem} {state}: {count}{example}")
+    
     return queue
 
 
@@ -1075,6 +1090,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=DEFAULT_MAX_CONCURRENT_SEARCHES,
         help=f"Number of parallel searches to run (default: {DEFAULT_MAX_CONCURRENT_SEARCHES}, max ~10).",
     )
+    parser.add_argument(
+        "--find",
+        type=str,
+        default=None,
+        help="Search for a specific string in all download filenames (case-insensitive) and show their states.",
+    )
 
     args = parser.parse_args(argv)
     
@@ -1114,7 +1135,28 @@ def main(argv: Optional[List[str]] = None) -> None:
         print(f"ERROR: Failed to query downloads from slskd: {exc}")
         sys.exit(1)
 
-    queue = build_problem_queue(raw)
+    # Handle --find: search for specific filename
+    if args.find:
+        search_term = args.find.lower()
+        print(f"Searching for '{args.find}' in all downloads...\n")
+        found_count = 0
+        for item in iter_download_items(raw):
+            if search_term in item.key.filename.lower() or search_term in item.key.directory.lower():
+                in_problem = "✓ PROBLEM" if item.state in PROBLEM_STATES else "✗ NOT PROBLEM"
+                print(f"[{in_problem}] state={item.state}")
+                print(f"  user: {item.key.username}")
+                print(f"  dir:  {item.key.directory}")
+                print(f"  file: {item.key.filename}")
+                print(f"  size: {item.size / 1024 / 1024:.2f} MiB")
+                print()
+                found_count += 1
+        if found_count == 0:
+            print(f"No downloads found matching '{args.find}'")
+        else:
+            print(f"Found {found_count} download(s) matching '{args.find}'")
+        return
+
+    queue = build_problem_queue(raw, debug=True)
     process_queue(
         slskd=slskd,
         queue=queue,
