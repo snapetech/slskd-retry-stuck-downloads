@@ -318,7 +318,7 @@ def start_search(slskd: SlskdSession, search_text: str, search_timeout_ms: int =
         return None
 
 
-def poll_search(slskd: SlskdSession, search_id: str, force_responses: bool = False) -> Tuple[bool, Optional[List]]:
+def poll_search(slskd: SlskdSession, search_id: str, force_responses: bool = False, debug: bool = False) -> Tuple[bool, Optional[List]]:
     """Poll a search. Returns (is_complete, responses_or_None).
     If force_responses=True, return whatever responses exist even if not complete."""
     try:
@@ -326,9 +326,13 @@ def poll_search(slskd: SlskdSession, search_id: str, force_responses: bool = Fal
         if resp.status_code >= 400:
             return False, None
         data = resp.json()
-        is_complete = data.get("isComplete", False) or "Completed" in data.get("state", "")
+        state = data.get("state", "")
+        is_complete = data.get("isComplete", False) or "Completed" in state
         responses = data.get("responses", [])
         response_count = data.get("responseCount", 0)
+        
+        if debug:
+            print(f"[DEBUG] Search {search_id}: state={state}, isComplete={data.get('isComplete')}, responseCount={response_count}, responses_len={len(responses)}")
         
         if is_complete:
             return True, responses
@@ -338,7 +342,9 @@ def poll_search(slskd: SlskdSession, search_id: str, force_responses: bool = Fal
                 print(f"[DEBUG] Search {search_id}: responseCount={response_count} but responses empty!")
             return True, responses if responses else []
         return False, None
-    except requests.RequestException:
+    except requests.RequestException as e:
+        if debug:
+            print(f"[DEBUG] Search {search_id}: poll error: {e}")
         return False, None
 
 
@@ -376,6 +382,7 @@ def batch_search(
     # Poll until all complete or timeout
     poll_interval = 2.0
     elapsed = 0.0
+    first_poll = True
     
     while active_searches and elapsed < max_wait:
         time.sleep(poll_interval)
@@ -383,10 +390,13 @@ def batch_search(
         
         completed = []
         for search_id, item in active_searches.items():
-            is_complete, responses = poll_search(slskd, search_id)
+            # Debug on first poll to see search states
+            is_complete, responses = poll_search(slskd, search_id, debug=first_poll)
             if is_complete:
                 results[item] = responses
                 completed.append(search_id)
+        
+        first_poll = False
         
         for search_id in completed:
             del active_searches[search_id]
