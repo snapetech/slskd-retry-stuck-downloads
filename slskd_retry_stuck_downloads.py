@@ -406,9 +406,17 @@ def batch_search(
     
     # Mark remaining as timed out - try to get whatever responses exist
     for search_id, item in active_searches.items():
+        # Debug: show final state before giving up
+        try:
+            debug_resp = slskd.get(f"/searches/{search_id}", params={"includeResponses": "true"})
+            debug_data = debug_resp.json()
+            print(f"[DEBUG-FINAL] {search_id[:8]}: state={debug_data.get('state')}, responseCount={debug_data.get('responseCount', 0)}, responses_len={len(debug_data.get('responses', []))}")
+        except Exception as e:
+            print(f"[DEBUG-FINAL] {search_id[:8]}: error fetching - {e}")
+        
         # Try one final fetch, forcing responses even if not complete
         is_complete, responses = poll_search(slskd, search_id, force_responses=True)
-        results[item] = responses
+        results[item] = responses if responses else []
         if responses:
             print(f"[BATCH] Got {len(responses)} partial responses for '{clean_track_title(item.key.filename)}'")
     
