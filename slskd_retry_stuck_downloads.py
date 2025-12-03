@@ -58,6 +58,7 @@ PROBLEM_STATES = {
     "Completed, Errored",
     "Completed, Rejected",
     "Completed, Aborted",
+    "Completed, Cancelled",  # User-cancelled items (often due to being stuck)
 }
 
 
