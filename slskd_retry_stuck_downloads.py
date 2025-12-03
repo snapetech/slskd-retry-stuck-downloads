@@ -769,8 +769,11 @@ def find_best_alt_candidate(
 
         for f in files:
             total_files += 1
-            ext = (f.get("extension") or "").lower().lstrip(".")
             path = f.get("filename") or f.get("fullname") or ""
+            ext = (f.get("extension") or "").lower().lstrip(".")
+            # Fallback: extract extension from filename if API didn't provide it
+            if not ext and "." in path:
+                ext = path.rsplit(".", 1)[-1].lower()
             
             # Must match target extension (filter if no ext or different ext)
             if target_ext:
