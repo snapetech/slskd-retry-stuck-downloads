@@ -987,19 +987,40 @@ def prompt_alt_replacement(
             print(f"[ALT] Failed to enqueue new download: {reason_enqueue}")
             return False
     
+    # Near-miss: outside auto-replace threshold
+    is_near_miss = auto_replace and abs_rel_pct > auto_replace_threshold
+    
     if auto_mode:
-        if auto_replace and abs_rel_pct > auto_replace_threshold:
+        if is_near_miss:
             print(f"[ALT] ⚠ NEAR-MISS: Size diff {abs_rel_pct:.1f}% > {auto_replace_threshold}% threshold.")
             print(f"[ALT]   → Manual review: {alt['username']} :: {alt['path']}")
         else:
             print("[ALT] Auto mode: alternative logged. Swap in slskd/Lidarr UI if desired.")
     else:
+        # Interactive mode - offer to replace
         try:
-            ans = input("Open this candidate in the UI and replace the stuck download there? [y/N]: ").strip().lower()
-            if ans == "y":
-                print("[ALT] A better source exists; please swap it in slskd and/or Lidarr as needed.")
+            if is_near_miss:
+                print(f"[ALT] ⚠ Size diff {abs_rel_pct:.1f}% exceeds {auto_replace_threshold}% auto-replace threshold.")
+                ans = input("[ALT] Replace anyway? [y/N]: ").strip().lower()
             else:
-                print("[ALT] Keeping current source; script will continue retrying as configured.")
+                ans = input("[ALT] Replace with this alternative? [y/N]: ").strip().lower()
+            
+            if ans == "y":
+                # Actually do the replacement
+                ok_cancel, reason_cancel = cancel_download(slskd, item, remove=True)
+                if not ok_cancel:
+                    print(f"[ALT] Failed to cancel old download: {reason_cancel}")
+                    return False
+                
+                ok_enqueue, reason_enqueue = enqueue_download(slskd, alt['username'], alt['path'], alt['size'])
+                if ok_enqueue:
+                    print(f"[ALT] ✓ Replaced! Now downloading from {alt['username']}")
+                    return True
+                else:
+                    print(f"[ALT] Failed to enqueue new download: {reason_enqueue}")
+                    return False
+            else:
+                print("[ALT] Skipped. Keeping current source.")
         except EOFError:
             print("[ALT] Non-interactive mode: alternative logged.")
     print()
@@ -1396,9 +1417,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
     args = parser.parse_args(argv)
     
-    # --auto-replace implies --auto
-    if args.auto_replace:
-        args.auto = True
+    # Note: --auto-replace does NOT imply --auto anymore
+    # This allows interactive prompts for near-misses (outside auto-replace threshold)
+    # Use both flags together (--auto --auto-replace) for fully non-interactive mode
 
     if not args.api_key:
         parser.error("You must provide an API key via --api-key or SLSKD_API_KEY env var.")
