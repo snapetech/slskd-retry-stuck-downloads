@@ -487,7 +487,7 @@ def perform_search(slskd: SlskdSession, search_text: str, max_wait: float = 30.0
     return result
 
 
-def find_best_alt_candidate(responses_state: object, target_size: int, target_ext: str) -> Optional[dict]:
+def find_best_alt_candidate(responses_state: object, target_size: int, target_ext: str) -> Tuple[Optional[dict], Optional[dict]]:
     """
     Given the SearchState JSON (with 'responses' list) OR a bare list of responses,
     find the best alt candidate:
@@ -497,7 +497,9 @@ def find_best_alt_candidate(responses_state: object, target_size: int, target_ex
       - shorter queue length better
       - higher upload speed better
 
-    Returns a dict describing the chosen candidate, or None.
+    Returns (best_within_threshold, closest_any) - two dicts or None.
+    - best_within_threshold: best candidate within size threshold (for auto-replace)
+    - closest_any: closest candidate by size regardless of threshold (for reporting)
     """
     # Normalise responses_state into a list of response dicts
     if isinstance(responses_state, list):
@@ -509,6 +511,10 @@ def find_best_alt_candidate(responses_state: object, target_size: int, target_ex
 
     best: Optional[dict] = None
     best_score: Optional[Tuple[int, int, int]] = None
+    
+    # Track closest match regardless of threshold
+    closest: Optional[dict] = None
+    closest_diff: Optional[float] = None
     
     # Debug counters
     total_files = 0
@@ -534,14 +540,33 @@ def find_best_alt_candidate(responses_state: object, target_size: int, target_ex
                 continue
 
             size = int(f.get("size") or 0)
+            path = f.get("filename") or f.get("fullname") or ""
+            
+            # Calculate size diff
             if target_size > 0 and size > 0:
                 rel_diff = abs(size - target_size) / float(target_size)
-                if rel_diff > DEFAULT_MAX_SIZE_DIFF:
-                    filtered_size += 1
-                    continue
-
-            # Path / name to display
-            path = f.get("filename") or f.get("fullname") or ""
+            else:
+                rel_diff = 0.0
+            
+            # Track closest match by size (for reporting)
+            if closest_diff is None or rel_diff < closest_diff:
+                closest_diff = rel_diff
+                closest = {
+                    "username": username,
+                    "queueLength": queue_len,
+                    "hasFreeUploadSlot": free_slot,
+                    "uploadSpeed": upload_speed,
+                    "file": f,
+                    "path": path,
+                    "size": size,
+                    "extension": ext,
+                    "size_diff_pct": rel_diff * 100,
+                }
+            
+            # Filter by threshold for auto-replace candidate
+            if target_size > 0 and size > 0 and rel_diff > DEFAULT_MAX_SIZE_DIFF:
+                filtered_size += 1
+                continue
 
             score = (
                 1 if free_slot else 0,     # prefer free slots
@@ -567,7 +592,7 @@ def find_best_alt_candidate(responses_state: object, target_size: int, target_ex
           f"filtered_ext={filtered_ext}, filtered_size={filtered_size}, "
           f"candidates_evaluated={total_files - filtered_ext - filtered_size}")
     
-    return best
+    return best, closest
 
 
 def format_size(mi_bytes: float) -> str:
@@ -652,9 +677,11 @@ def prompt_alt_replacement(
             return False
     
     if auto_mode:
-        if auto_replace:
-            print(f"[ALT] Size diff {abs_rel_pct:.1f}% > {auto_replace_threshold}% threshold, skipping auto-replace.")
-        print("[ALT] Auto mode: alternative logged. Swap in slskd/Lidarr UI if desired.")
+        if auto_replace and abs_rel_pct > auto_replace_threshold:
+            print(f"[ALT] ⚠ NEAR-MISS: Size diff {abs_rel_pct:.1f}% > {auto_replace_threshold}% threshold.")
+            print(f"[ALT]   → Manual review: {alt['username']} :: {alt['path']}")
+        else:
+            print("[ALT] Auto mode: alternative logged. Swap in slskd/Lidarr UI if desired.")
     else:
         try:
             ans = input("Open this candidate in the UI and replace the stuck download there? [y/N]: ").strip().lower()
@@ -812,9 +839,14 @@ def process_queue(
                     if responses is None:
                         print(f"[ALT] No search results for '{clean_track_title(batch_item.key.filename)}'")
                     else:
-                        best = find_best_alt_candidate(responses, batch_item.size, batch_item.ext)
+                        best, closest = find_best_alt_candidate(responses, batch_item.size, batch_item.ext)
                         if not best:
-                            print(f"[ALT] No suitable alt for '{clean_track_title(batch_item.key.filename)}'")
+                            track_name = clean_track_title(batch_item.key.filename)
+                            if closest:
+                                print(f"[ALT] No auto-replace candidate for '{track_name}'")
+                                print(f"[ALT]   → Closest match: {closest['size_diff_pct']:.1f}% diff - {closest['username']} :: {closest['path']}")
+                            else:
+                                print(f"[ALT] No suitable alt for '{track_name}'")
                         else:
                             replaced = prompt_alt_replacement(
                                 slskd, batch_item, best,
