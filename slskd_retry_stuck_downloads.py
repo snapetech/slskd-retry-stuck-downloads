@@ -944,8 +944,8 @@ def process_queue(
 
         if ok:
             print(f"[OK] Re-enqueued {item.display_name()} (state={item.state})")
-            # Remove from queue; don't increment idx
-            queue.pop(idx)
+            # Keep in queue but move to back - only remove when actually REPLACED
+            queue.append(queue.pop(idx))
             continue
 
         # Not OK
