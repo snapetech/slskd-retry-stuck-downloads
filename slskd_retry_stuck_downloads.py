@@ -74,7 +74,7 @@ class DownloadKey:
         return (self.directory.lower(), self.filename.lower())
 
 
-@dataclass
+@dataclass(frozen=True)
 class DownloadItem:
     key: DownloadKey
     id: str
