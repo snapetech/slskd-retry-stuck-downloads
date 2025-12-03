@@ -252,7 +252,7 @@ def reenqueue_download(slskd: SlskdSession, item: DownloadItem) -> Tuple[bool, O
 def clean_track_title(filename: str, strip_artist: str = None) -> str:
     """
     Best-effort cleanup of a track filename into a search-friendly title.
-    If strip_artist is provided, remove "Artist - " prefix from the title.
+    Strips track numbers, quality info, special characters, and optionally artist prefix.
     """
     name = filename
     
@@ -267,22 +267,43 @@ def clean_track_title(filename: str, strip_artist: str = None) -> str:
     # Replace underscores with spaces
     name = name.replace("_", " ")
 
-    # Drop leading disc-track numbers like "1-17 ", "2-03 ", then standalone "01 - ", "0106 - " etc.
-    # First handle disc-track format: "1-17 Artist - Song" -> "Artist - Song"
-    name = re.sub(r"^[0-9]{1,2}-[0-9]{1,4}[\s.\-)_]+", "", name).strip()
-    # Then handle remaining standalone track numbers: "01 - Song" or "01 Song"
-    name = re.sub(r"^[0-9]{1,4}[\s.\-)_]+", "", name).strip()
+    # Strip quality/bitrate info: "(FLAC 1077 kbps)", "[FLAC]", "(320kbps)", etc.
+    name = re.sub(r"\s*\(?\[?(?:FLAC|MP3|AAC|ALAC|WAV|OGG|WMA)[\s\d]*(?:kbps|kHz|bit)?\]?\)?", "", name, flags=re.IGNORECASE)
+    name = re.sub(r"\s*\(?\[?\d+\s*kbps\]?\)?", "", name, flags=re.IGNORECASE)
+    
+    # Strip year patterns that might interfere: "(2011)", "[1997]"
+    # But be careful not to strip if it's the only content
+    if len(re.sub(r"\s*[\(\[]?\d{4}[\)\]]?\s*", "", name).strip()) > 3:
+        name = re.sub(r"\s*[\(\[]?\d{4}[\)\]]?\s*", " ", name)
 
+    # Drop leading disc-track numbers like "1-17 ", "2-03 ", "CD-01 -", then standalone "01 - ", "0106 - " etc.
+    name = re.sub(r"^(?:CD-?)?\d{1,2}-[0-9]{1,4}[\s.\-)_]+", "", name, flags=re.IGNORECASE).strip()
+    # Then handle remaining standalone track numbers: "01 - Song" or "01 Song" or "01. Song"
+    name = re.sub(r"^[0-9]{1,4}[\s.\-)_]+", "", name).strip()
+    
+    # Strip track numbers in middle of string: "Artist - Album - 01 - Song" -> "Artist - Album - Song"
+    # This handles "- 01 -", "- 07 -", etc.
+    name = re.sub(r"\s+-\s+\d{1,3}\s+-\s+", " - ", name)
+    
     # Strip "Artist - " prefix if we already have the artist from directory
-    # Handles: "Bassnectar - Parade Into Centuries" -> "Parade Into Centuries"
-    # Also handles: "Bassnectar feat. Guest - Song" or "Bassnectar with Sayr - Song"
     if strip_artist:
         # Pattern: "Artist - ", "Artist feat. X - ", "Artist with X - ", "Artist & X - "
-        artist_pattern = re.escape(strip_artist) + r"(?:\s+(?:feat\.?|with|&|and)[^-]*)?\s*-\s*"
+        artist_pattern = re.escape(strip_artist) + r"(?:\s+(?:feat\.?|featuring|with|&|and|vs\.?)[^-]*)?\s*-\s*"
         name = re.sub(f"^{artist_pattern}", "", name, flags=re.IGNORECASE).strip()
+        # Also strip if artist appears after album: "Album - Artist - Song" (less common)
+        name = re.sub(rf"\s*-\s*{re.escape(strip_artist)}\s*-\s*", " - ", name, flags=re.IGNORECASE)
 
-    # Collapse whitespace
+    # Strip common junk suffixes
+    name = re.sub(r"\s*[\(\[]?(?:official|music|video|audio|lyric|lyrics|explicit|clean|remaster|remastered|remix|edit|version|ver\.?)[\)\]]?\s*$", "", name, flags=re.IGNORECASE)
+    
+    # Strip parenthetical content that's just noise (but keep meaningful stuff like "(feat. X)")
+    # Only strip if it's not "feat" related
+    name = re.sub(r"\s*\([^)]*(?:remix|edit|mix|version|ver\.?|remaster|instrumental|acoustic|live|demo)\)", "", name, flags=re.IGNORECASE)
+
+    # Collapse whitespace and extra dashes
     name = re.sub(r"\s+", " ", name)
+    name = re.sub(r"\s*-\s*-\s*", " - ", name)  # Fix double dashes from removals
+    name = re.sub(r"^\s*-\s*|\s*-\s*$", "", name)  # Strip leading/trailing dashes
 
     return name.strip()
 
@@ -876,9 +897,11 @@ def process_queue(
                     if item.key not in existing_keys:
                         queue.append(item)
                 last_snapshot_ts = now
+                # Clear alt_offered_for so we re-search (users may have come online)
+                alt_offered_for.clear()
                 sort_queue_by_priority()  # Re-sort so fresh items come first
                 idx = 0  # start from front again
-                print(f"[INFO] Snapshot refreshed. Queue now has {len(queue)} items (sorted by priority).")
+                print(f"[INFO] Snapshot refreshed. Queue now has {len(queue)} items (sorted by priority). Alt-search cache cleared.")
                 if not queue:
                     print("[INFO] No remaining problem downloads after refresh.")
                     return
@@ -907,9 +930,9 @@ def process_queue(
             print(f"[INFO] Skipping re-enqueue for {item.display_name()} (retry_before_replace=0)")
             ok, reason = False, "skipped"
         elif track_key in alt_offered_for:
-            # Already searched, no suitable alt - skip this item entirely
-            print(f"[INFO] Skipping {item.display_name()} - already searched, no suitable alt found")
-            queue.pop(idx)
+            # Already searched recently - move to back for later retry (users may come online)
+            # Don't remove from queue - just deprioritize and continue to next item
+            queue.append(queue.pop(idx))
             continue
         else:
             ok, reason = reenqueue_download(slskd, item)
