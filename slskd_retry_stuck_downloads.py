@@ -1049,9 +1049,17 @@ def process_queue(
     search_timeout_ms: int = DEFAULT_SEARCH_TIMEOUT_MS,
     batch_size: int = DEFAULT_MAX_CONCURRENT_SEARCHES,
 ) -> None:
-    if not queue:
-        print("No problem downloads found; nothing to do.")
-        return
+    # If no problem downloads initially, wait for some to appear
+    while not queue:
+        print(f"[INFO] No problem downloads found. Waiting {snapshot_refresh_interval:.0f}s for new problem downloads...")
+        time.sleep(snapshot_refresh_interval)
+        try:
+            raw = fetch_all_downloads(slskd)
+            queue.extend(build_problem_queue(raw))
+            if queue:
+                print(f"[INFO] Found {len(queue)} problem download(s), starting processing...")
+        except Exception as exc:
+            print(f"[WARN] Failed to check for new downloads: {exc}")
 
     # Deduplicate queue by track_key (keep first occurrence)
     seen_tracks: Set[Tuple[str, str]] = set()
