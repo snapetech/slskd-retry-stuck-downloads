@@ -233,9 +233,10 @@ def reenqueue_download(slskd: SlskdSession, item: DownloadItem) -> Tuple[bool, O
 
 # ---------------------- Search / alt-source helpers ---------------------- #
 
-def clean_track_title(filename: str) -> str:
+def clean_track_title(filename: str, strip_artist: str = None) -> str:
     """
     Best-effort cleanup of a track filename into a search-friendly title.
+    If strip_artist is provided, remove "Artist - " prefix from the title.
     """
     name = filename
     
@@ -250,8 +251,19 @@ def clean_track_title(filename: str) -> str:
     # Replace underscores with spaces
     name = name.replace("_", " ")
 
-    # Drop leading track numbers like "01 - ", "1-02 ", "0106 - " etc.
+    # Drop leading disc-track numbers like "1-17 ", "2-03 ", then standalone "01 - ", "0106 - " etc.
+    # First handle disc-track format: "1-17 Artist - Song" -> "Artist - Song"
+    name = re.sub(r"^[0-9]{1,2}-[0-9]{1,4}[\s.\-)_]+", "", name).strip()
+    # Then handle remaining standalone track numbers: "01 - Song" or "01 Song"
     name = re.sub(r"^[0-9]{1,4}[\s.\-)_]+", "", name).strip()
+
+    # Strip "Artist - " prefix if we already have the artist from directory
+    # Handles: "Bassnectar - Parade Into Centuries" -> "Parade Into Centuries"
+    # Also handles: "Bassnectar feat. Guest - Song" or "Bassnectar with Sayr - Song"
+    if strip_artist:
+        # Pattern: "Artist - ", "Artist feat. X - ", "Artist with X - ", "Artist & X - "
+        artist_pattern = re.escape(strip_artist) + r"(?:\s+(?:feat\.?|with|&|and)[^-]*)?\s*-\s*"
+        name = re.sub(f"^{artist_pattern}", "", name, flags=re.IGNORECASE).strip()
 
     # Collapse whitespace
     name = re.sub(r"\s+", " ", name)
@@ -273,17 +285,18 @@ def infer_artist_from_directory(directory: str) -> Optional[str]:
 
 def build_search_text(item: DownloadItem) -> str:
     """
-    Heuristic search text: "artist track flac".
+    Heuristic search text: "artist track" (no extension - we filter results by ext).
     """
-    title = clean_track_title(item.key.filename)
     artist = infer_artist_from_directory(item.key.directory)
+    # Pass artist to clean_track_title so it can strip "Artist - " prefix
+    title = clean_track_title(item.key.filename, strip_artist=artist)
     pieces = []
     if artist:
         pieces.append(artist)
     if title:
         pieces.append(title)
-    if item.ext:
-        pieces.append(item.ext)
+    # Don't include extension in search - it can cause zero results
+    # We filter by extension when evaluating candidates instead
     return " ".join(pieces).strip()
 
 
