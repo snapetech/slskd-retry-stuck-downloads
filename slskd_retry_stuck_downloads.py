@@ -322,25 +322,31 @@ def poll_search(slskd: SlskdSession, search_id: str, force_responses: bool = Fal
     """Poll a search. Returns (is_complete, responses_or_None).
     If force_responses=True, return whatever responses exist even if not complete."""
     try:
-        resp = slskd.get(f"/searches/{search_id}", params={"includeResponses": "true"})
+        # First get search state
+        resp = slskd.get(f"/searches/{search_id}")
         if resp.status_code >= 400:
             return False, None
         data = resp.json()
         state = data.get("state", "")
         is_complete = data.get("isComplete", False) or "Completed" in state
-        responses = data.get("responses", [])
         response_count = data.get("responseCount", 0)
         
         if debug:
-            print(f"[DEBUG] Search {search_id}: state={state}, isComplete={data.get('isComplete')}, responseCount={response_count}, responses_len={len(responses)}")
+            print(f"[DEBUG] Search {search_id}: state={state}, isComplete={data.get('isComplete')}, responseCount={response_count}")
         
-        if is_complete:
-            return True, responses
-        elif force_responses:
-            # Return whatever we have, even empty list (with debug)
-            if response_count > 0 and len(responses) == 0:
-                print(f"[DEBUG] Search {search_id}: responseCount={response_count} but responses empty!")
-            return True, responses if responses else []
+        # If complete OR we have responses and want them, fetch from /responses endpoint
+        if is_complete or (force_responses and response_count > 0):
+            resp2 = slskd.get(f"/searches/{search_id}/responses")
+            if resp2.status_code < 400:
+                responses = resp2.json()
+                if debug:
+                    print(f"[DEBUG] Search {search_id}: fetched {len(responses)} responses from /responses endpoint")
+                return True, responses
+            else:
+                # Fall back to inline responses
+                responses = data.get("responses", [])
+                return is_complete, responses if responses else []
+        
         return False, None
     except requests.RequestException as e:
         if debug:
