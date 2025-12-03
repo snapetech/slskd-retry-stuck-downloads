@@ -746,6 +746,10 @@ def find_best_alt_candidate(
     total_files = 0
     filtered_ext = 0
     filtered_size = 0
+    
+    # Sample filtered files for debug (keep a few examples)
+    ext_filtered_samples: List[Tuple[str, str, str]] = []  # (username, path, ext)
+    ext_counts: Dict[str, int] = {}  # Count by extension
 
     for resp in responses:
         # Debug: show what keys are in each response
@@ -766,14 +770,20 @@ def find_best_alt_candidate(
         for f in files:
             total_files += 1
             ext = (f.get("extension") or "").lower().lstrip(".")
+            path = f.get("filename") or f.get("fullname") or ""
+            
             # Must match target extension (filter if no ext or different ext)
             if target_ext:
                 if not ext or ext != target_ext:
                     filtered_ext += 1
+                    # Track extension counts
+                    ext_counts[ext or "(none)"] = ext_counts.get(ext or "(none)", 0) + 1
+                    # Keep up to 3 samples
+                    if len(ext_filtered_samples) < 3:
+                        ext_filtered_samples.append((username, path, ext or "(none)"))
                     continue
 
             size = int(f.get("size") or 0)
-            path = f.get("filename") or f.get("fullname") or ""
             
             # Calculate size diff - reject files with 0 size
             if size <= 0:
@@ -827,9 +837,19 @@ def find_best_alt_candidate(
                 }
 
     # Debug output
+    candidates_evaluated = total_files - filtered_ext - filtered_size
     print(f"[ALT-DEBUG] responses={len(responses)}, total_files={total_files}, "
           f"filtered_ext={filtered_ext}, filtered_size={filtered_size}, "
-          f"candidates_evaluated={total_files - filtered_ext - filtered_size}")
+          f"candidates_evaluated={candidates_evaluated}")
+    
+    # If no candidates but we filtered everything by extension, show what we found
+    if candidates_evaluated == 0 and filtered_ext > 0 and ext_counts:
+        ext_summary = ", ".join(f"{ext}:{cnt}" for ext, cnt in sorted(ext_counts.items(), key=lambda x: -x[1])[:5])
+        print(f"[ALT-DEBUG] Extensions found (wanted {target_ext}): {ext_summary}")
+        if ext_filtered_samples:
+            for usr, pth, fext in ext_filtered_samples[:2]:
+                short_path = pth.split('\\')[-1] if '\\' in pth else pth.split('/')[-1]
+                print(f"[ALT-DEBUG]   e.g. [{fext}] {usr} :: {short_path}")
     
     return best, closest
 
