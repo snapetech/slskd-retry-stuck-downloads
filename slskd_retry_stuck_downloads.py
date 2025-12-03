@@ -354,81 +354,68 @@ def poll_search(slskd: SlskdSession, search_id: str, force_responses: bool = Fal
         return False, None
 
 
-def batch_search(
+def sliding_window_search(
     slskd: SlskdSession,
     search_items: List[Tuple[DownloadItem, str]],  # (item, search_text)
+    max_concurrent: int = DEFAULT_MAX_CONCURRENT_SEARCHES,
     search_timeout_ms: int = DEFAULT_SEARCH_TIMEOUT_MS,
-    max_wait: float = 30.0,
+    per_search_timeout: float = 15.0,
 ) -> Dict[DownloadItem, Optional[List]]:
     """
-    Perform multiple searches in parallel.
-    Returns dict mapping item -> responses (or None if failed).
+    Perform searches with sliding window - keep max_concurrent searches running at all times.
+    As soon as one finishes, start the next. Much more efficient than fixed batches.
+    Returns dict mapping item -> responses (or None/[] if failed).
     """
     results: Dict[DownloadItem, Optional[List]] = {}
     
     if not search_items:
         return results
     
-    print(f"[BATCH] Starting {len(search_items)} parallel searches...")
+    print(f"[SEARCH] Processing {len(search_items)} searches (max {max_concurrent} concurrent)...")
     
-    # Start all searches
-    active_searches: Dict[str, DownloadItem] = {}  # search_id -> item
-    for item, search_text in search_items:
-        search_id = start_search(slskd, search_text, search_timeout_ms)
-        if search_id:
-            active_searches[search_id] = item
-            print(f"[BATCH] Started search for '{clean_track_title(item.key.filename)}'")
-        else:
-            results[item] = None
-            print(f"[BATCH] Failed to start search for '{clean_track_title(item.key.filename)}'")
+    pending = list(search_items)  # Queue of items waiting to be searched
+    active: Dict[str, Tuple[DownloadItem, float]] = {}  # search_id -> (item, start_time)
+    poll_interval = 1.0
     
-    if not active_searches:
-        return results
-    
-    # Poll until all complete or timeout
-    poll_interval = 2.0
-    elapsed = 0.0
-    first_poll = True
-    
-    while active_searches and elapsed < max_wait:
+    while pending or active:
+        # Start new searches up to max_concurrent
+        while pending and len(active) < max_concurrent:
+            item, search_text = pending.pop(0)
+            search_id = start_search(slskd, search_text, search_timeout_ms)
+            if search_id:
+                active[search_id] = (item, time.time())
+                print(f"[SEARCH] Started: '{clean_track_title(item.key.filename)}'")
+            else:
+                results[item] = []
+                print(f"[SEARCH] Failed to start: '{clean_track_title(item.key.filename)}'")
+        
+        if not active:
+            break
+        
         time.sleep(poll_interval)
-        elapsed += poll_interval
         
+        # Check active searches
         completed = []
-        for search_id, item in active_searches.items():
-            # Check if search has results we can grab (even if not "complete")
-            is_complete, responses = poll_search(slskd, search_id, force_responses=True, debug=first_poll)
-            if is_complete and responses:
-                results[item] = responses
+        now = time.time()
+        for search_id, (item, start_time) in active.items():
+            elapsed = now - start_time
+            timed_out = elapsed >= per_search_timeout
+            
+            # Try to get responses (force if timed out)
+            is_complete, responses = poll_search(slskd, search_id, force_responses=timed_out)
+            
+            if is_complete or timed_out:
+                results[item] = responses if responses else []
                 completed.append(search_id)
-                if first_poll:
-                    print(f"[BATCH] Got {len(responses)} responses for '{clean_track_title(item.key.filename)}'")
-        
-        first_poll = False
+                status = "✓" if responses else "✗"
+                count = len(responses) if responses else 0
+                print(f"[SEARCH] {status} '{clean_track_title(item.key.filename)}': {count} responses ({elapsed:.0f}s)")
         
         for search_id in completed:
-            del active_searches[search_id]
-        
-        if active_searches:
-            print(f"[BATCH] {elapsed:.0f}s: {len(results)} complete, {len(active_searches)} pending")
+            del active[search_id]
     
-    # Mark remaining as timed out - try to get whatever responses exist
-    for search_id, item in active_searches.items():
-        # Debug: show final state before giving up
-        try:
-            debug_resp = slskd.get(f"/searches/{search_id}", params={"includeResponses": "true"})
-            debug_data = debug_resp.json()
-            print(f"[DEBUG-FINAL] {search_id[:8]}: state={debug_data.get('state')}, responseCount={debug_data.get('responseCount', 0)}, responses_len={len(debug_data.get('responses', []))}")
-        except Exception as e:
-            print(f"[DEBUG-FINAL] {search_id[:8]}: error fetching - {e}")
-        
-        # Try one final fetch, forcing responses even if not complete
-        is_complete, responses = poll_search(slskd, search_id, force_responses=True)
-        results[item] = responses if responses else []
-        if responses:
-            print(f"[BATCH] Got {len(responses)} partial responses for '{clean_track_title(item.key.filename)}'")
-    
-    print(f"[BATCH] Completed {len(results)} searches")
+    found = sum(1 for r in results.values() if r)
+    print(f"[SEARCH] Done: {found}/{len(results)} searches found results")
     return results
 
 
@@ -873,12 +860,13 @@ def process_queue(
             
             # Process batch when full or at end of queue
             if len(pending_alt_searches) >= batch_size or idx >= len(queue) - 1:
-                print(f"\n[BATCH] Processing {len(pending_alt_searches)} alt-source searches...")
+                print(f"\n[SEARCH] Processing {len(pending_alt_searches)} alt-source searches...")
                 
-                # Run batch search
-                search_results = batch_search(
+                # Run sliding window search (keeps max_concurrent searches running at all times)
+                search_results = sliding_window_search(
                     slskd,
                     [(itm, stxt) for itm, stxt, _ in pending_alt_searches],
+                    max_concurrent=batch_size,
                     search_timeout_ms=search_timeout_ms,
                 )
                 
