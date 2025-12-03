@@ -328,6 +328,127 @@ def infer_artist_from_directory(directory: str) -> Optional[str]:
     return None
 
 
+def infer_album_from_directory(directory: str) -> Optional[str]:
+    """
+    Try to infer album from the remote directory path.
+    E.g. "flac\\Lil Jon & The East Side Boyz\\2004 - Crunk Juice"
+        -> album "Crunk Juice" (stripped of year prefix)
+    """
+    parts = [p for p in re.split(r"[\\/]", directory) if p]
+    if parts:
+        album = parts[-1]
+        # Strip common year prefixes: "2004 - Album", "(2004) Album", "[2004] Album"
+        album = re.sub(r"^\s*[\(\[]?\d{4}[\)\]]?\s*[-_]?\s*", "", album)
+        # Strip year suffixes: "Album (2004)", "Album [2004]"
+        album = re.sub(r"\s*[\(\[]\d{4}[\)\]]\s*$", "", album)
+        # Strip quality tags
+        album = re.sub(r"\s*[\(\[]?(?:FLAC|MP3|320|V0|24-?(?:bit|96)|HD)[\)\]]?\s*$", "", album, flags=re.IGNORECASE)
+        return album.strip() if album.strip() else None
+    return None
+
+
+def build_album_search_text(item: DownloadItem) -> Optional[str]:
+    """
+    Build an album-level search query: "artist album"
+    Used as fallback when track-specific search fails.
+    """
+    artist = infer_artist_from_directory(item.key.directory)
+    album = infer_album_from_directory(item.key.directory)
+    
+    if not album:
+        return None
+    
+    pieces = []
+    if artist:
+        pieces.append(artist)
+    pieces.append(album)
+    return " ".join(pieces)
+
+
+def find_track_in_album_results(
+    responses: List[dict],
+    target_filename: str,
+    target_size: int,
+    target_ext: str,
+    exclude_usernames: Optional[Set[str]] = None,
+    max_size_diff: float = DEFAULT_MAX_SIZE_DIFF,
+) -> Optional[dict]:
+    """
+    Search album-level results for our specific track.
+    Looks for files with matching filename (fuzzy) and size within threshold.
+    Returns best matching candidate or None.
+    """
+    if not responses:
+        return None
+    
+    # Clean target filename for comparison
+    target_clean = clean_track_title(target_filename).lower()
+    target_words = set(re.findall(r'\w+', target_clean))
+    
+    best_match = None
+    best_score = 0
+    
+    for resp in responses:
+        username = resp.get("username", "")
+        if exclude_usernames and username.lower() in [u.lower() for u in exclude_usernames]:
+            continue
+        
+        files = resp.get("files", [])
+        for f in files:
+            path = f.get("filename", "")
+            size = f.get("size", 0)
+            ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+            
+            # Must match extension
+            if target_ext and ext != target_ext:
+                continue
+            
+            # Must be within size threshold
+            if target_size > 0 and size > 0:
+                rel_diff = abs(size - target_size) / float(target_size)
+                if rel_diff > max_size_diff:
+                    continue
+            elif size == 0:
+                continue
+            
+            # Score by filename similarity (word overlap)
+            file_clean = clean_track_title(path).lower()
+            file_words = set(re.findall(r'\w+', file_clean))
+            
+            if not target_words or not file_words:
+                continue
+            
+            # Jaccard-like similarity
+            overlap = len(target_words & file_words)
+            union = len(target_words | file_words)
+            similarity = overlap / union if union > 0 else 0
+            
+            # Require at least 50% word overlap
+            if similarity < 0.5:
+                continue
+            
+            # Score: similarity first, then prefer closer size, then free slot
+            size_closeness = 1.0 - (rel_diff if target_size > 0 else 0)
+            has_slot = 1 if resp.get("hasFreeUploadSlot", False) else 0
+            queue_penalty = min(resp.get("queueLength", 0), 100) / 100.0
+            
+            score = (similarity * 100) + (size_closeness * 10) + (has_slot * 5) - queue_penalty
+            
+            if score > best_score:
+                best_score = score
+                best_match = {
+                    "username": username,
+                    "path": path,
+                    "size": size,
+                    "hasFreeUploadSlot": resp.get("hasFreeUploadSlot", False),
+                    "queueLength": resp.get("queueLength", 0),
+                    "uploadSpeed": resp.get("uploadSpeed", 0),
+                    "similarity": similarity,
+                }
+    
+    return best_match
+
+
 def build_search_text(item: DownloadItem) -> str:
     """
     Heuristic search text: "artist track" (no extension - we filter results by ext).
@@ -998,14 +1119,18 @@ def process_queue(
                 
                 # Process results
                 items_to_remove = set()
+                album_fallback_needed: List[Tuple[DownloadItem, str, Tuple[str, str]]] = []
+                
                 for batch_item, batch_search_text, batch_track_key in pending_alt_searches:
                     responses = search_results.get(batch_item)
                     track_name = clean_track_title(batch_item.key.filename)
                     
                     if responses is None:
                         print(f"[ALT] Search failed/timed out for '{track_name}' (search: '{batch_search_text}')")
+                        album_fallback_needed.append((batch_item, batch_search_text, batch_track_key))
                     elif len(responses) == 0:
                         print(f"[ALT] Zero results on network for '{track_name}' (search: '{batch_search_text}')")
+                        album_fallback_needed.append((batch_item, batch_search_text, batch_track_key))
                     else:
                         # Exclude all previously failed sources for this track
                         excluded = failed_sources_for_track.get(batch_track_key, set())
@@ -1021,6 +1146,7 @@ def process_queue(
                                 print(f"[ALT]   → Closest match: {closest['size_diff_pct']:.1f}% diff - {closest['username']} :: {closest['path']}")
                             else:
                                 print(f"[ALT] No suitable alt for '{track_name}'")
+                            album_fallback_needed.append((batch_item, batch_search_text, batch_track_key))
                         else:
                             replaced = prompt_alt_replacement(
                                 slskd, batch_item, best,
@@ -1030,6 +1156,73 @@ def process_queue(
                             )
                             if replaced:
                                 items_to_remove.add(batch_track_key)
+                
+                # Album-level fallback for tracks that had no suitable results
+                if album_fallback_needed:
+                    # Group by album to avoid duplicate searches
+                    album_searches: Dict[str, List[Tuple[DownloadItem, Tuple[str, str]]]] = {}
+                    for fb_item, fb_search, fb_track_key in album_fallback_needed:
+                        album_query = build_album_search_text(fb_item)
+                        if album_query:
+                            if album_query not in album_searches:
+                                album_searches[album_query] = []
+                            album_searches[album_query].append((fb_item, fb_track_key))
+                    
+                    if album_searches:
+                        print(f"\n[ALBUM-FALLBACK] Trying album-level search for {len(album_searches)} album(s)...")
+                        
+                        for album_query, items_for_album in album_searches.items():
+                            print(f"[ALBUM-FALLBACK] Searching: '{album_query}'")
+                            
+                            # Do a single album search
+                            search_id = start_search(slskd, album_query, search_timeout_ms)
+                            if not search_id:
+                                print(f"[ALBUM-FALLBACK] Failed to start search for '{album_query}'")
+                                continue
+                            
+                            # Poll for results
+                            album_responses = None
+                            for _ in range(15):  # 15 seconds max
+                                time.sleep(1)
+                                is_complete, resp = poll_search(slskd, search_id)
+                                if resp:
+                                    album_responses = resp
+                                if is_complete:
+                                    break
+                            
+                            if not album_responses:
+                                print(f"[ALBUM-FALLBACK] No results for '{album_query}'")
+                                continue
+                            
+                            print(f"[ALBUM-FALLBACK] Got {len(album_responses)} responses for '{album_query}'")
+                            
+                            # Check each item that needs this album
+                            for fb_item, fb_track_key in items_for_album:
+                                if fb_track_key in items_to_remove:
+                                    continue  # Already replaced
+                                
+                                excluded = failed_sources_for_track.get(fb_track_key, set())
+                                track_match = find_track_in_album_results(
+                                    album_responses,
+                                    fb_item.key.filename,
+                                    fb_item.size,
+                                    fb_item.ext,
+                                    exclude_usernames=excluded,
+                                )
+                                
+                                if track_match:
+                                    track_name = clean_track_title(fb_item.key.filename)
+                                    print(f"[ALBUM-FALLBACK] ✓ Found '{track_name}' via album search!")
+                                    print(f"[ALBUM-FALLBACK]   → {track_match['username']} :: {track_match['path']} ({track_match['similarity']*100:.0f}% match)")
+                                    
+                                    replaced = prompt_alt_replacement(
+                                        slskd, fb_item, track_match,
+                                        auto_mode=auto_mode,
+                                        auto_replace=auto_replace,
+                                        auto_replace_threshold=auto_replace_threshold,
+                                    )
+                                    if replaced:
+                                        items_to_remove.add(fb_track_key)
                 
                 # Remove replaced items from queue
                 if items_to_remove:
