@@ -305,16 +305,22 @@ def start_search(slskd: SlskdSession, search_text: str, search_timeout_ms: int =
         return None
 
 
-def poll_search(slskd: SlskdSession, search_id: str) -> Tuple[bool, Optional[List]]:
-    """Poll a search. Returns (is_complete, responses_or_None)."""
+def poll_search(slskd: SlskdSession, search_id: str, force_responses: bool = False) -> Tuple[bool, Optional[List]]:
+    """Poll a search. Returns (is_complete, responses_or_None).
+    If force_responses=True, return whatever responses exist even if not complete."""
     try:
         resp = slskd.get(f"/searches/{search_id}", params={"includeResponses": "true"})
         if resp.status_code >= 400:
             return False, None
         data = resp.json()
         is_complete = data.get("isComplete", False) or "Completed" in data.get("state", "")
+        responses = data.get("responses", [])
+        
         if is_complete:
-            return True, data.get("responses", [])
+            return True, responses
+        elif force_responses and responses:
+            # Return partial results if we have any
+            return True, responses
         return False, None
     except requests.RequestException:
         return False, None
@@ -372,11 +378,13 @@ def batch_search(
         if active_searches:
             print(f"[BATCH] {elapsed:.0f}s: {len(results)} complete, {len(active_searches)} pending")
     
-    # Mark remaining as timed out
+    # Mark remaining as timed out - try to get whatever responses exist
     for search_id, item in active_searches.items():
-        # Try one final fetch
-        is_complete, responses = poll_search(slskd, search_id)
-        results[item] = responses if is_complete else None
+        # Try one final fetch, forcing responses even if not complete
+        is_complete, responses = poll_search(slskd, search_id, force_responses=True)
+        results[item] = responses
+        if responses:
+            print(f"[BATCH] Got {len(responses)} partial responses for '{clean_track_title(item.key.filename)}'")
     
     print(f"[BATCH] Completed {len(results)} searches")
     return results
