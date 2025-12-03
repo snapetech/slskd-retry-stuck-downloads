@@ -818,7 +818,30 @@ def process_queue(
     pending_alt_searches: List[Tuple[DownloadItem, str, Tuple[str, str]]] = []  # (item, search_text, track_key)
     last_snapshot_ts = time.monotonic()
 
-    # Simple round-robin over queue
+    def get_item_priority(item: DownloadItem) -> Tuple[int, float, int]:
+        """
+        Priority tuple (lower = higher priority):
+        1. Retry count (0 retries first)
+        2. Time since last attempt (longer ago = higher priority, so negate)
+        3. Number of failed sources tried
+        """
+        tk = item.key.track_key()
+        retry_count = track_retry_counts.get(tk, 0)
+        last_attempt = last_retry_at.get(item.key, 0)
+        time_since_last = now - last_attempt if last_attempt else float('inf')
+        failed_source_count = len(failed_sources_for_track.get(tk, set()))
+        # Return tuple: lower values = higher priority
+        # Negate time_since_last so longer waits get priority
+        return (retry_count, -time_since_last, failed_source_count)
+    
+    def sort_queue_by_priority():
+        """Sort queue so fresh items and long-waiting items come first."""
+        nonlocal queue
+        queue.sort(key=get_item_priority)
+    
+    # Sort initially and process in priority order
+    now = time.monotonic()
+    sort_queue_by_priority()
     idx = 0
     while idx < len(queue):
         now = time.monotonic()
@@ -837,8 +860,9 @@ def process_queue(
                     if item.key not in existing_keys:
                         queue.append(item)
                 last_snapshot_ts = now
+                sort_queue_by_priority()  # Re-sort so fresh items come first
                 idx = 0  # start from front again
-                print(f"[INFO] Snapshot refreshed. Queue now has {len(queue)} items.")
+                print(f"[INFO] Snapshot refreshed. Queue now has {len(queue)} items (sorted by priority).")
                 if not queue:
                     print("[INFO] No remaining problem downloads after refresh.")
                     return
