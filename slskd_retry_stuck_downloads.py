@@ -315,12 +315,15 @@ def poll_search(slskd: SlskdSession, search_id: str, force_responses: bool = Fal
         data = resp.json()
         is_complete = data.get("isComplete", False) or "Completed" in data.get("state", "")
         responses = data.get("responses", [])
+        response_count = data.get("responseCount", 0)
         
         if is_complete:
             return True, responses
-        elif force_responses and responses:
-            # Return partial results if we have any
-            return True, responses
+        elif force_responses:
+            # Return whatever we have, even empty list (with debug)
+            if response_count > 0 and len(responses) == 0:
+                print(f"[DEBUG] Search {search_id}: responseCount={response_count} but responses empty!")
+            return True, responses if responses else []
         return False, None
     except requests.RequestException:
         return False, None
@@ -844,12 +847,15 @@ def process_queue(
                 items_to_remove = set()
                 for batch_item, batch_search_text, batch_track_key in pending_alt_searches:
                     responses = search_results.get(batch_item)
+                    track_name = clean_track_title(batch_item.key.filename)
+                    
                     if responses is None:
-                        print(f"[ALT] No search results for '{clean_track_title(batch_item.key.filename)}'")
+                        print(f"[ALT] Search failed/timed out for '{track_name}' (search: '{batch_search_text}')")
+                    elif len(responses) == 0:
+                        print(f"[ALT] Zero results on network for '{track_name}' (search: '{batch_search_text}')")
                     else:
                         best, closest = find_best_alt_candidate(responses, batch_item.size, batch_item.ext)
                         if not best:
-                            track_name = clean_track_title(batch_item.key.filename)
                             if closest:
                                 print(f"[ALT] No auto-replace candidate for '{track_name}'")
                                 print(f"[ALT]   → Closest match: {closest['size_diff_pct']:.1f}% diff - {closest['username']} :: {closest['path']}")
