@@ -301,7 +301,7 @@ def build_search_text(item: DownloadItem) -> str:
 
 
 DEFAULT_SEARCH_TIMEOUT_MS = 10000  # 10 seconds - faster than default 15s
-DEFAULT_MAX_CONCURRENT_SEARCHES = 8  # slskd supports up to 10, leave headroom
+DEFAULT_MAX_CONCURRENT_SEARCHES = 2  # slskd only processes ~2 concurrent searches
 
 
 def start_search(slskd: SlskdSession, search_text: str, search_timeout_ms: int = DEFAULT_SEARCH_TIMEOUT_MS) -> Optional[str]:
@@ -396,11 +396,13 @@ def batch_search(
         
         completed = []
         for search_id, item in active_searches.items():
-            # Debug on first poll to see search states
-            is_complete, responses = poll_search(slskd, search_id, debug=first_poll)
-            if is_complete:
+            # Check if search has results we can grab (even if not "complete")
+            is_complete, responses = poll_search(slskd, search_id, force_responses=True, debug=first_poll)
+            if is_complete and responses:
                 results[item] = responses
                 completed.append(search_id)
+                if first_poll:
+                    print(f"[BATCH] Got {len(responses)} responses for '{clean_track_title(item.key.filename)}'")
         
         first_poll = False
         
