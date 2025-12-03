@@ -861,7 +861,7 @@ def format_size(mi_bytes: float) -> str:
     return f"{mi_bytes:.2f} MiB"
 
 
-DEFAULT_AUTO_REPLACE_THRESHOLD = 5.0  # percent
+DEFAULT_AUTO_REPLACE_THRESHOLD = 7.0  # percent
 
 
 def enqueue_download(slskd: SlskdSession, username: str, filename: str, size: int, max_retries: int = 3) -> Tuple[bool, str]:
