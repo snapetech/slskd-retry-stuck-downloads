@@ -605,8 +605,10 @@ def find_best_alt_candidate(responses_state: object, target_size: int, target_ex
                 filtered_size += 1
                 continue
 
+            # Score: prioritize CLOSEST SIZE first, then free slot, queue, speed as tiebreakers
             score = (
-                1 if free_slot else 0,     # prefer free slots
+                -rel_diff,                 # closest size is best (negative so smaller diff = higher score)
+                1 if free_slot else 0,     # then prefer free slots
                 -queue_len,                # smaller queue is better
                 upload_speed,              # faster better
             )
@@ -622,6 +624,7 @@ def find_best_alt_candidate(responses_state: object, target_size: int, target_ex
                     "path": path,
                     "size": size,
                     "extension": ext,
+                    "size_diff_pct": rel_diff * 100,  # Include for logging
                 }
 
     # Debug output
