@@ -544,12 +544,12 @@ def find_best_alt_candidate(
     responses_state: object,
     target_size: int,
     target_ext: str,
-    exclude_username: str = None,
+    exclude_usernames: Set[str] = None,
 ) -> Tuple[Optional[dict], Optional[dict]]:
     """
     Given the SearchState JSON (with 'responses' list) OR a bare list of responses,
     find the best alt candidate:
-      - NOT from exclude_username (the original failing source)
+      - NOT from any user in exclude_usernames (failed sources for this track)
       - same extension where possible
       - size within DEFAULT_MAX_SIZE_DIFF
       - closest size match preferred
@@ -588,8 +588,8 @@ def find_best_alt_candidate(
         
         username = resp.get("username") or ""
         
-        # Skip the original failing source - no point replacing with same user!
-        if exclude_username and username.lower() == exclude_username.lower():
+        # Skip any previously failed sources for this track
+        if exclude_usernames and username.lower() in {u.lower() for u in exclude_usernames}:
             continue
         
         queue_len = int(resp.get("queueLength") or 0)
@@ -812,6 +812,9 @@ def process_queue(
     track_retry_counts: Dict[Tuple[str, str], int] = {}
     last_retry_at: Dict[DownloadKey, float] = {}
     alt_offered_for: set[Tuple[str, str]] = set()
+    # Track failed sources per track - don't cycle back to users we've already tried
+    failed_sources_for_track: Dict[Tuple[str, str], Set[str]] = {}
+    MAX_FAILED_SOURCES_BEFORE_RESET = 10  # After trying 10 different sources, allow cycling back
     pending_alt_searches: List[Tuple[DownloadItem, str, Tuple[str, str]]] = []  # (item, search_text, track_key)
     last_snapshot_ts = time.monotonic()
 
@@ -895,6 +898,16 @@ def process_queue(
         )
         
         if needs_alt_search:
+            # Add current failing source to the blacklist for this track
+            if track_key not in failed_sources_for_track:
+                failed_sources_for_track[track_key] = set()
+            failed_sources_for_track[track_key].add(item.key.username)
+            
+            # Reset blacklist if we've tried too many sources (allow cycling back)
+            if len(failed_sources_for_track[track_key]) >= MAX_FAILED_SOURCES_BEFORE_RESET:
+                print(f"[INFO] Tried {len(failed_sources_for_track[track_key])} sources for '{track_key[1]}', resetting blacklist")
+                failed_sources_for_track[track_key] = {item.key.username}  # Keep only current
+            
             # Collect this item for batch processing
             search_text = build_search_text(item)
             pending_alt_searches.append((item, search_text, track_key))
@@ -923,10 +936,13 @@ def process_queue(
                     elif len(responses) == 0:
                         print(f"[ALT] Zero results on network for '{track_name}' (search: '{batch_search_text}')")
                     else:
-                        # Exclude the original failing source from candidates
+                        # Exclude all previously failed sources for this track
+                        excluded = failed_sources_for_track.get(batch_track_key, set())
+                        if excluded:
+                            print(f"[ALT-DEBUG] Excluding {len(excluded)} previously tried sources: {', '.join(sorted(excluded))}")
                         best, closest = find_best_alt_candidate(
                             responses, batch_item.size, batch_item.ext,
-                            exclude_username=batch_item.key.username
+                            exclude_usernames=excluded
                         )
                         if not best:
                             if closest:
