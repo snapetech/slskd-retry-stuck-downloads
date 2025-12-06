@@ -1,3 +1,6 @@
+## !! This Script Is Not Maintained!  This was a prototype that lead to the creation of [slskdn](https://github.com/snapetech/slskdn/), a fork of slskd with this retry-stuck feature built in -- amongst many others. !!
+
+
 # slskd-retry-stuck-downloads
 
 Utility to automatically retry and replace stuck Soulseek downloads managed by [slskd](https://github.com/slskd/slskd).
